@@ -1,41 +1,62 @@
 import axios from "axios";
+import "dotenv/config";
 
-// This hits Shopee's *internal* v4 API — the same endpoints shopee.ph itself
-// calls when you browse the site. It is undocumented and unofficial, so:
-//   - endpoints/params can change without notice
-//   - aggressive polling WILL get your IP rate-limited or soft-banned
-//   - this is for personal/aggregator use on public data, not resale of Shopee's data
+// Shopee's internal v4 API — same endpoints shopee.ph calls in the browser.
+// Undocumented, unofficial, and subject to change without notice.
 //
-// Keep requestDelayMs generous (config/targets.json) and don't run this
-// from a shared IP that also needs to browse Shopee normally.
+// TWO COMMON FAILURE MODES:
+//   403 — cookie is missing/expired. Fix: refresh SHOPEE_COOKIE (see README).
+//   404 — endpoint path or required params changed. Fix: re-sniff from DevTools.
+//
+// HOW TO SNIFF THE CORRECT HEADERS + ENDPOINTS:
+//   1. Open shopee.ph in an incognito window (logged out).
+//   2. DevTools → Network tab → filter by "api/v4".
+//   3. Browse a shop or do a search — find the relevant request.
+//   4. Right-click → Copy → Copy as fetch (or curl).
+//   5. Pull the cookie string from the request headers and put it in scraper/.env.
+//   6. If an endpoint path below has drifted, update it to match what you see.
 
 const BASE_URL = "https://shopee.ph/api/v4";
 
-// Headers matter a lot here — Shopee's edge will 403/serve garbage without
-// a browser-like fingerprint. Pull a fresh 'cookie' string from your own
-// logged-out browser session (DevTools -> Network -> any shopee.ph request
-// -> copy request headers) if this stops working; the anti-bot layer
-// rotates what it checks periodically.
+const cookie = process.env.SHOPEE_COOKIE || "";
+if (!cookie) {
+  console.warn(
+    "[shopee] WARNING: SHOPEE_COOKIE is empty — requests will likely 403.\n" +
+    "         Grab a cookie from DevTools (see README) and set it in scraper/.env"
+  );
+}
+
+// Keep this header set close to what a real Chrome browser sends.
+// If 403s persist even with a valid cookie, re-sniff all headers from DevTools
+// and replace the block below wholesale.
 const DEFAULT_HEADERS = {
   "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
   Accept: "application/json",
   "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
   Referer: "https://shopee.ph/",
+  Origin: "https://shopee.ph",
   "X-API-SOURCE": "pc",
-  // A real cookie string (even an anonymous/guest one) meaningfully improves
-  // your success rate. Grab one manually and drop it in a .env file, e.g.
-  // SHOPEE_COOKIE="SPC_F=...; SPC_SI=...; ..."
-  Cookie: process.env.SHOPEE_COOKIE || "",
+  "X-Requested-With": "XMLHttpRequest",
+  "sec-ch-ua": '"Chromium";v="125", "Not.A/Brand";v="24"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "sec-fetch-dest": "empty",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-site": "same-origin",
+  Cookie: cookie,
 };
 
 const client = axios.create({
   baseURL: BASE_URL,
   headers: DEFAULT_HEADERS,
   timeout: 15000,
+  // Follow redirects — Shopee occasionally 302s on edge nodes
+  maxRedirects: 5,
 });
 
-function sleep(ms) {
+export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -49,15 +70,33 @@ async function requestWithRetry(path, params, { maxRetries = 3, delayMs = 2000 }
       lastError = err;
       const status = err.response?.status;
       console.warn(`[shopee] ${path} attempt ${attempt} failed (status ${status ?? "?"})`);
-      // Back off harder on 403/429 — that's Shopee telling you to slow down
-      const backoff = status === 403 || status === 429 ? delayMs * attempt * 2 : delayMs * attempt;
+
+      if (status === 403) {
+        console.warn(
+          "[shopee] 403 = anti-bot rejection. Most likely cause: stale/missing cookie.\n" +
+          "         Refresh SHOPEE_COOKIE in scraper/.env and retry."
+        );
+      }
+      if (status === 404) {
+        console.warn(
+          "[shopee] 404 = endpoint path or params have changed on Shopee's side.\n" +
+          "         Re-sniff the correct path from DevTools (see client.js header comment)."
+        );
+        // No point retrying a 404 — endpoint itself is wrong
+        break;
+      }
+
+      const backoff = (status === 429) ? delayMs * attempt * 3 : delayMs * attempt;
       await sleep(backoff);
     }
   }
   throw lastError;
 }
 
-// Search products by keyword (optionally scoped to a category via matchId)
+// ── Endpoints ────────────────────────────────────────────────────────────────
+// If any of these return 404, open DevTools on shopee.ph, reproduce the action
+// (search / browse shop), and find the updated path in the Network tab.
+
 export async function searchItems(keyword, { matchId = null, limit = 30, page = 0 } = {}, opts) {
   const params = {
     by: "relevancy",
@@ -68,26 +107,31 @@ export async function searchItems(keyword, { matchId = null, limit = 30, page = 
     page_type: "search",
     scenario: "PAGE_GLOBAL_SEARCH",
     version: 2,
+    // Required as of mid-2024 — Shopee checks this matches the cookie session
+    // If still 403, try removing this param (it varies by session type)
+    SPC_CDS_VER: 2,
   };
   if (matchId) params.match_id = matchId;
   return requestWithRetry("/search/search_items", params, opts);
 }
 
-// Get all products currently listed by a specific shop
 export async function getShopItems(shopId, { limit = 30, offset = 0 } = {}, opts) {
+  // NOTE: Shopee moved shop product listing to a different path — update here
+  // if 404 persists after checking DevTools. Common alternates seen in the wild:
+  //   /shop/get_items          (older)
+  //   /pdp/get_pc_promotions   (promo-scoped)
+  //   /recommend/recommend_by_shop (recommendation-based listing)
   const params = {
     shopid: shopId,
     limit,
     offset,
-    tab: "all",
+    tab_type: 0,    // 0 = all items (some versions use "tab" key instead)
+    sort_type: 1,
   };
   return requestWithRetry("/shop/get_items", params, opts);
 }
 
-// Get full detail (price, stock, variants) for one product
 export async function getItemDetail(shopId, itemId, opts) {
   const params = { shopid: shopId, itemid: itemId };
   return requestWithRetry("/item/get", params, opts);
 }
-
-export { sleep };
