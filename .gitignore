@@ -1,0 +1,8 @@
+node_modules/
+.env
+dist/
+scraper/data/
+
+# Docker volumes managed separately
+postgres_data/
+n8n_data/

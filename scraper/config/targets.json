@@ -1,0 +1,31 @@
+{
+  "_comment": "shopId comes from a Shopee shop URL: shopee.ph/shopname.<shopId> — open a shop page and check the URL or Network tab (v4/shop/get response has 'shopid'). categoryId is optional, used to filter a shop's own listing by category.",
+
+  "shops": [
+    {
+      "name": "Example PC Shop 1",
+      "shopId": 123456789,
+      "note": "replace with real shopId, e.g. from PCHub/DynaQuest/EasyPC storefront URL"
+    },
+    {
+      "name": "Example PC Shop 2",
+      "shopId": 987654321,
+      "note": "replace with real shopId"
+    }
+  ],
+
+  "keywordSearches": [
+    {
+      "keyword": "RX 7600 8GB",
+      "matchId": null,
+      "note": "matchId is Shopee's category filter id, leave null to search all categories"
+    },
+    {
+      "keyword": "144hz IPS monitor built in speakers",
+      "matchId": null
+    }
+  ],
+
+  "requestDelayMs": 2000,
+  "maxRetries": 3
+}
